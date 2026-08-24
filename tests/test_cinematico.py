@@ -381,9 +381,36 @@ def test_preparacao_termina_no_downbeat():
 def test_instrumentos_de_cinema_soam_e_nao_estouram(preset):
     inst = CIN.instrumento(preset)
     y = inst.render_note(40, 1.5, SR, 110)
-    assert len(y) > SR * 0.4
+    # O relogio e a excecao proposital: um tique tem que durar 50 a 160 ms e
+    # calar. Se ele durasse os 0,4 s que os outros duram, nao seria um tique —
+    # seria um bloco de madeira com cauda, e o ouvido nao o usaria para cravar
+    # o instante, que e a unica funcao dele.
+    minimo = SR * 0.04 if "Relogio" in preset else SR * 0.4
+    assert len(y) > minimo
     assert float(np.abs(y).max()) <= 1.7
     assert float(np.sqrt((y ** 2).mean())) > 1e-4
+
+
+def test_tique_e_curto_e_taque_e_diferente():
+    """Duas exigencias que fazem um relogio: o tique cala rapido (senao vira
+    um bloco de madeira ressoando) e as duas batidas nao sao o mesmo som."""
+    inst = CIN.instrumento("Relogio")
+    tique = inst.render_note(72, 0.5, SR, 100)
+    taque = inst.render_note(70, 0.5, SR, 100)
+    assert len(tique) / SR < 0.25
+    n = min(len(tique), len(taque))
+    assert abs(float(np.corrcoef(tique[:n], taque[:n])[0, 1])) < 0.6
+
+
+def test_vento_respira():
+    """Ruido estatico o ouvido descarta como defeito de gravacao; ruido que
+    varia devagar ele aceita como ambiente. A envoltoria tem que se mexer."""
+    y = CIN.instrumento("Mata").render_note(60, 12.0, SR, 100)
+    jan = int(SR * 0.25)
+    env = np.array([float(np.sqrt((y[i:i + jan] ** 2).mean()))
+                    for i in range(0, len(y) - jan, jan)])
+    meio = env[len(env) // 6: -len(env) // 6]
+    assert meio.std() / max(meio.mean(), 1e-9) > 0.08
 
 
 def test_impacto_e_taiko_moram_no_grave():

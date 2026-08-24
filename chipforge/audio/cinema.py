@@ -355,8 +355,113 @@ class Taiko(_Base):
         return self._pos(np.tanh(y * (1.2 + 0.9 * v)) * (0.3 + 0.7 * v))
 
 
+@dataclass
+class Relogio(_Base):
+    """Tique-taque. Duas camadas, porque o escape de um relogio tem duas.
+
+    1. O CLIQUE — ruido de banda estreita com 3 ms de vida. E ele que o ouvido
+       usa para cravar o instante, e por isso ele nao pode ter cauda nenhuma.
+    2. A RESSONANCIA — a caixa de madeira respondendo, uma senoide curta em
+       torno de 400 Hz. Sem ela o tique soa como um estalo digital; com ela,
+       soa como um objeto num comodo.
+
+    A altura da nota controla o brilho do clique, entao escrever alturas
+    ALTERNADAS produz o tique-taque: dois sons parecidos e nao iguais, que e o
+    que o escape de verdade faz — a roda passa por dois dentes diferentes.
+    """
+    corpo_hz: float = 380.0
+    aspereza: float = 0.55          # quanto de madeira contra metal
+    cauda_s: float = 0.09
+
+    def render_note(self, pitch: float, dur_s: float, sr: int,
+                    velocity: int = 100, prev_pitch=None,
+                    release: bool = True) -> np.ndarray:
+        v = float(np.clip(velocity / 127.0, 0.05, 1.0))
+        n = max(64, int(sr * self.cauda_s))
+        rng = _rng(self.seed, pitch, dur_s)
+        t = np.arange(n) / sr
+
+        brilho = 1400.0 * (2.0 ** ((pitch - 60) / 12.0))
+        br = rng.normal(0, 1, n).astype(np.float32)
+        clique = fx.biquad(br, sr, "peak", float(np.clip(brilho, 300, 12000)),
+                           2.5, 12.0)
+        clique = fx.biquad(clique, sr, "highpass", 700.0, 0.7)
+        clique *= np.exp(-380.0 * t)
+
+        f = self.corpo_hz * (2.0 ** ((pitch - 60) / 24.0))
+        corpo = np.sin(2 * np.pi * f * t).astype(np.float32) * np.exp(-70.0 * t)
+
+        y = clique * self.aspereza + corpo * (1.0 - self.aspereza) * 0.8
+        return self._pos(y * (0.45 + 0.55 * v))
+
+
+@dataclass
+class Vento(_Base):
+    """Vento e mata: ruido de banda larga que RESPIRA.
+
+    O que faz uma cama de ruido soar como um lugar em vez de um chiado e a
+    variacao lenta — o filtro andando e o nivel subindo e descendo em ciclos de
+    varios segundos, sem periodo audivel. Ruido estatico o ouvido descarta como
+    defeito de gravacao em poucos segundos; ruido que respira ele aceita como
+    ambiente e para de notar, que e exatamente o que se quer de um fundo.
+
+    A nota nao tem altura: a duracao e o unico parametro que importa.
+    """
+    centro_hz: float = 620.0
+    largura: float = 2.2            # oitavas de excursao do filtro
+    respiracao_s: float = 7.0
+    galhos: float = 0.0             # estalos ocasionais de madeira
+
+    def render_note(self, pitch: float, dur_s: float, sr: int,
+                    velocity: int = 100, prev_pitch=None,
+                    release: bool = True) -> np.ndarray:
+        v = float(np.clip(velocity / 127.0, 0.05, 1.0))
+        n = max(1024, int(dur_s * sr))
+        rng = _rng(self.seed, pitch, dur_s)
+        br = rng.normal(0, 1, n).astype(np.float32)
+
+        # tres osciladores lentos incomensuraveis: a soma nunca se repete
+        t = np.arange(n) / sr
+        lento = (np.sin(2 * np.pi * t / self.respiracao_s)
+                 + 0.6 * np.sin(2 * np.pi * t / (self.respiracao_s * 1.61) + 1.1)
+                 + 0.4 * np.sin(2 * np.pi * t / (self.respiracao_s * 2.73) + 2.3))
+        lento = lento / 2.0
+
+        saida = np.zeros(n, dtype=np.float32)
+        passo = max(2048, int(sr * 0.08))
+        for i in range(0, n, passo):
+            j = min(i + passo, n)
+            k = float(lento[min(i, n - 1)])
+            centro = self.centro_hz * (2.0 ** (k * self.largura * 0.5))
+            centro = float(np.clip(centro, 60.0, sr * 0.4))
+            trecho = fx.biquad(br[i:j], sr, "highpass", centro * 0.6, 0.7)
+            saida[i:j] = fx.biquad(trecho, sr, "lowpass", centro * 2.4, 0.8)
+
+        env = 0.45 + 0.55 * (0.5 + 0.5 * lento)
+        # entra e sai por rampa longa: vento que comeca de repente e um efeito
+        borda = min(n // 2, int(sr * 1.2))
+        if borda > 1:
+            env[:borda] *= np.linspace(0.0, 1.0, borda)
+            env[-borda:] *= np.linspace(1.0, 0.0, borda)
+        y = saida * env
+
+        if self.galhos > 0:
+            quantos = int(dur_s * self.galhos)
+            for _ in range(quantos):
+                i = int(rng.integers(0, max(1, n - 2000)))
+                dur = int(rng.integers(200, 1400))
+                estalo = rng.normal(0, 1, dur).astype(np.float32)
+                estalo = fx.biquad(estalo, sr, "peak",
+                                   float(rng.uniform(900, 4200)), 3.0, 10.0)
+                estalo *= np.exp(-np.linspace(0, 14, dur)) * rng.uniform(0.2, 0.7)
+                y[i:i + dur] += estalo
+
+        return self._pos(y * (0.4 + 0.6 * v))
+
+
 CLASSES = {c.__name__: c for c in
-           (Impacto, Riser, SubDrop, Braam, SwellInvertido, Taiko)}
+           (Impacto, Riser, SubDrop, Braam, SwellInvertido, Taiko, Relogio,
+            Vento)}
 
 
 # ==========================================================================
@@ -376,6 +481,16 @@ PRESETS_CINEMA: dict[str, tuple] = {
     "Swell invertido": (SwellInvertido, dict(gain=0.6)),
     "Taiko": (Taiko, dict(gain=0.85)),
     "Taiko pequeno": (Taiko, dict(corpo_hz=112, decaimento=9.0, gain=0.8)),
+    "Relogio": (Relogio, dict(gain=0.55)),
+    "Relogio grande": (Relogio, dict(corpo_hz=210.0, aspereza=0.42,
+                                     cauda_s=0.16, gain=0.6)),
+    "Relogio de bolso": (Relogio, dict(corpo_hz=900.0, aspereza=0.8,
+                                       cauda_s=0.05, gain=0.5)),
+    "Vento": (Vento, dict(gain=0.5)),
+    "Mata": (Vento, dict(centro_hz=480.0, largura=2.6, respiracao_s=9.0,
+                         galhos=0.35, gain=0.5)),
+    "Vento agudo": (Vento, dict(centro_hz=1600.0, largura=1.6,
+                                respiracao_s=5.0, gain=0.42)),
 }
 
 

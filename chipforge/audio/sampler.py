@@ -345,6 +345,8 @@ class SamplerInstrument:
     wavetable: str = "gb_sine"
     arpeggio: tuple = ()
     vibrato_depth_cents: float = 0.0
+    vibrato_hz: float = 5.2
+    vibrato_atraso_s: float = 0.28     # o arco pega antes do vibrato entrar
     detune_cents: float = 0.0
     # True = usa o envelope e o filtro que vem dentro do .sf2 (o certo).
     # A interface poe False quando voce mexe nos sliders de ADSR na mao.
@@ -417,7 +419,21 @@ class SamplerInstrument:
         ls = hdr.loop_start - hdr.start
         le = hdr.loop_end - hdr.start
 
-        idx = np.arange(total, dtype=np.float64) * ratio
+        if self.vibrato_depth_cents > 0:
+            # Vibrato de verdade: a razao de leitura varia AO LONGO da nota, e
+            # a posicao e a integral dela. Ate agora este campo existia no
+            # dataclass e nao era lido por ninguem — um violino solo saia com
+            # a afinacao travada, que e exatamente o que denuncia sample.
+            #
+            # A entrada e atrasada de proposito: violinista nao comeca a nota
+            # com vibrato ligado, ele instala o vibrato depois que o arco pegou.
+            t = np.arange(total, dtype=np.float64) / sr
+            sobe = np.clip((t - self.vibrato_atraso_s) / 0.35, 0.0, 1.0)
+            osc = np.sin(2 * np.pi * self.vibrato_hz * t)
+            fator = 2.0 ** (sobe * self.vibrato_depth_cents * osc / 1200.0)
+            idx = np.cumsum(ratio * fator) - ratio * fator[0]
+        else:
+            idx = np.arange(total, dtype=np.float64) * ratio
         if loop:
             loop_len = le - ls
             over = idx >= ls
