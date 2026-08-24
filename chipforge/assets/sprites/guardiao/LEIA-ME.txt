@@ -1,0 +1,9 @@
+Troque estes arquivos pelos seus.
+
+Cada nivelN.png e uma folha horizontal de quadros quadrados de 64x64.
+Pode usar outro tamanho: o app deduz o lado do quadro pela ALTURA da
+imagem, entao uma folha de 8 quadros de 96px fica 768x96.
+
+nivel1 = parado   ...   nivel5 = surto total
+Quanto maior a intensidade da musica, maior o nivel e mais rapida a
+animacao. Da tambem para usar uma pasta nivelN/ com os quadros soltos.

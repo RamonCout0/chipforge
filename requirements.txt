@@ -1,0 +1,12 @@
+numpy>=1.24
+sounddevice>=0.4
+PyQt6>=6.5
+
+# Recomendado. Tudo funciona sem ele — todo filtro tem laço direto de reserva —
+# mas o modo cinematográfico (voz por formantes, sala por convolução, master
+# multibanda) faz dezenas de milhares de passagens de filtro por faixa, e sem
+# scipy o render de três minutos passa de segundos para horas.
+scipy>=1.10
+
+# opcional, só para os testes
+pytest>=7.0
