@@ -77,8 +77,10 @@ def _render_track(tr, flat, sr: int, spt: float, total: int,
         from ..core.dinamica import Automacao
         auto = Automacao.from_list(curva)
 
+    # Bateria sintetizada só quando o instrumento não é de amostra (SoundFont ou SFZ
+    # trazem as próprias gravações de bumbo, caixa e pratos).
     chip_drums = getattr(tr.instrument, "is_drum", False) and \
-        not hasattr(tr.instrument, "preset")
+        getattr(tr.instrument, "osc", "") != "sample"
     if chip_drums:
         return render_drum_notes(flat, sr, spt, volume=tr.volume,
                                  total_samples=total, mapa=mapa, automacao=auto)
