@@ -67,6 +67,8 @@ class MainWindow(QMainWindow):
         self._analyze_song = False
         self.soundfont = None          # banco GM carregado, se houver
         self.curva = None               # curva de intensidade da musica
+        self._sujo = False              # ha mudanca nao salva?
+        self._pausado = False
 
         self.setWindowTitle("Chipforge Studio")
         self.resize(1580, 940)
@@ -82,6 +84,7 @@ class MainWindow(QMainWindow):
 
         self._reload_patterns()
         self._reload_tracks()
+        self._marcar_sujo(False)
         self.statusBar().showMessage("Pronto. Espaco toca, Esc para.")
 
     # ------------------------------------------------------------------
@@ -111,10 +114,13 @@ class MainWindow(QMainWindow):
 
         tb.addWidget(QLabel("  Bits "))
         self.cmb_bits = QComboBox()
-        self.cmb_bits.addItems(["8 bits (NES)", "16 bits (SNES)", "24 bits (limpo)"])
-        self.cmb_bits.setCurrentIndex({8: 0, 16: 1}.get(self.project.bit_depth, 2))
-        self.cmb_bits.currentIndexChanged.connect(
-            lambda i: setattr(self.project, "bit_depth", [8, 16, 24][i]))
+        self.cmb_bits.addItems(["8 bits (NES)", "16 bits (SNES)", "24 bits (limpo)",
+                                "32 bits (PS1)"])
+        self.cmb_bits.setToolTip(
+            "PS1: os samples passam pelo chip de som do PlayStation — ADPCM, "
+            "interpolacao gaussiana, 24 vozes e o reverb de hardware")
+        self.cmb_bits.setCurrentIndex(self._indice_bits())
+        self.cmb_bits.currentIndexChanged.connect(self._set_bits)
         tb.addWidget(self.cmb_bits)
 
         tb.addSeparator()
@@ -543,6 +549,61 @@ class MainWindow(QMainWindow):
     def _invalidate_audio(self):
         self._audio = None
         self.curva = None
+        self._marcar_sujo(True)
+
+    def _marcar_sujo(self, v: bool):
+        self._sujo = v
+        nome = self.path.name if self.path else self.project.name
+        self.setWindowTitle(f"{'• ' if v else ''}{nome} — Chipforge Studio")
+
+    def _indice_bits(self) -> int:
+        if (self.project.console or "") == "ps1":
+            return 3
+        return {8: 0, 16: 1}.get(self.project.bit_depth, 2)
+
+    def _set_bits(self, i: int):
+        # Antes so mudava o campo: o audio ja renderizado continuava em cache
+        # e o play seguia no bit depth antigo ate a proxima edicao de nota.
+        self.project.bit_depth = [8, 16, 24, 24][i]
+        self.project.console = "ps1" if i == 3 else ""
+        self._invalidate_audio()
+
+    def _sincronizar_barra(self):
+        """Depois de abrir/criar projeto, a barra mostra o projeto NOVO."""
+        for w, v in ((self.spin_bpm, self.project.bpm),
+                     (self.cmb_bits, self._indice_bits()),
+                     (self.cmb_key, self.project.key_root),
+                     (self.cmb_scale, list(T.SCALES).index(self.project.scale)
+                      if self.project.scale in T.SCALES else 0),
+                     (self.chk_lock, self.project.scale_lock)):
+            w.blockSignals(True)
+            if isinstance(w, QCheckBox):
+                w.setChecked(bool(v))
+            elif isinstance(w, QDoubleSpinBox):
+                w.setValue(v)
+            else:
+                w.setCurrentIndex(v)
+            w.blockSignals(False)
+
+    def _pode_descartar(self) -> bool:
+        """Pergunta antes de jogar fora trabalho nao salvo."""
+        if not self._sujo:
+            return True
+        r = QMessageBox.question(
+            self, "Mudancas nao salvas",
+            "Este projeto tem mudancas que nao foram salvas. Salvar antes?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel)
+        if r == QMessageBox.StandardButton.Save:
+            return self.save_project()
+        return r == QMessageBox.StandardButton.Discard
+
+    def closeEvent(self, e):
+        if self._pode_descartar():
+            self.player.stop()
+            e.accept()
+        else:
+            e.ignore()
 
     def _intensidade(self):
         if self.curva is None:
@@ -557,16 +618,29 @@ class MainWindow(QMainWindow):
         return self._audio
 
     def toggle_play(self):
-        if self.timer.isActive():
-            self.stop()
+        if self.timer.isActive():                     # tocando -> pausa
+            self.timer.stop()
+            self.player.pause()
+            self._pausado = True
+            self.btn_play.setText("▶  Continuar")
+            return
+        if self._pausado and self._audio is not None:  # pausado -> continua
+            self.player.resume()
         else:
+            # pausado mas a musica mudou: re-renderiza e retoma do mesmo ponto
+            inicio = self.player._pos if self._pausado else 0
+            self.player.stop()
             self.player.sr = self.project.sample_rate
-            self.player.play(self._render(), loop=self.btn_loop.isChecked())
-            self.btn_play.setText("❚❚  Pausar")
-            self.timer.start()
+            audio = self._render()
+            self.player.play(audio, loop=self.btn_loop.isChecked(),
+                             start_frame=min(inicio, max(0, len(audio) - 1)))
+        self._pausado = False
+        self.btn_play.setText("❚❚  Pausar")
+        self.timer.start()
 
     def stop(self):
         self.timer.stop()
+        self._pausado = False
         self.player.stop()
         self.btn_play.setText("▶  Tocar")
         self.roll.set_playhead(-1)
@@ -718,33 +792,52 @@ class MainWindow(QMainWindow):
     # arquivo
     # ------------------------------------------------------------------
     def new_project(self):
+        if not self._pode_descartar():
+            return
         self.stop()
         self.project = demo_project()
         self.path = None
         self.roll.grid.project = self.project
+        self._sincronizar_barra()
         self._reload_tracks(); self._reload_patterns(); self._invalidate_audio()
+        self._marcar_sujo(False)
 
-    def open_project(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Abrir projeto", "",
-                                           "Chipforge (*.chip)")
+    def open_project(self, f: str | None = None):
+        if not self._pode_descartar():
+            return
+        if not f:
+            f, _ = QFileDialog.getOpenFileName(self, "Abrir projeto", "",
+                                               "Chipforge (*.chip)")
         if not f:
             return
+        try:
+            novo = Project.load(f)
+        except Exception as e:
+            QMessageBox.warning(self, "Nao consegui abrir", str(e))
+            return
         self.stop()
-        self.project = Project.load(f)
+        self.project = novo
         self.path = Path(f)
         self.roll.grid.project = self.project
-        self.spin_bpm.setValue(self.project.bpm)
+        self._sincronizar_barra()
         self._reload_tracks(); self._reload_patterns(); self._invalidate_audio()
+        self._marcar_sujo(False)
+        if novo.avisos:
+            QMessageBox.information(self, "Projeto aberto com avisos",
+                                    "\n\n".join(novo.avisos))
 
-    def save_project(self, as_new: bool = False):
+    def save_project(self, as_new: bool = False) -> bool:
         if as_new or not self.path:
             f, _ = QFileDialog.getSaveFileName(self, "Salvar projeto",
                                                self.project.name, "Chipforge (*.chip)")
             if not f:
-                return
+                return False
             self.path = Path(f)
         p = self.project.save(self.path)
+        self.path = p
+        self._marcar_sujo(False)
         self.statusBar().showMessage(f"Salvo em {p}")
+        return True
 
     def import_midi(self):
         f, _ = QFileDialog.getOpenFileName(self, "Importar MIDI", "",

@@ -171,22 +171,39 @@ def install_source(src: Source, progress=None) -> list[Path]:
 
 
 def _extract(archive: Path, target_dir: Path) -> None:
-    """Aceita .zip e .tgz/.tar.gz — o npm serve tarball, os sites servem zip."""
+    """Aceita .zip e .tgz/.tar.gz — o npm serve tarball, os sites servem zip.
+
+    Arquivo baixado da internet nao e confiavel: um tar pode trazer
+    `pasta/../../.bashrc` ou um symlink apontando para fora. O filtro "data"
+    do tarfile (Python 3.12+, e backports a partir do 3.10.12) recusa tudo
+    isso; sem ele, a checagem manual abaixo faz o mesmo papel.
+    """
     import tarfile
     name = archive.name.lower()
+    alvo = target_dir.resolve()
     try:
         if name.endswith(".zip"):
             with zipfile.ZipFile(archive) as z:
+                for m in z.namelist():
+                    if not (alvo / m).resolve().is_relative_to(alvo):
+                        raise RuntimeError(f"caminho suspeito no zip: {m}")
                 z.extractall(target_dir)
         elif name.endswith((".tgz", ".tar.gz", ".tar")):
             with tarfile.open(archive) as t:
-                members = [m for m in t.getmembers()
-                           if not m.name.startswith(("/", ".."))]
-                t.extractall(target_dir, members=members)
+                if hasattr(tarfile, "data_filter"):
+                    t.extractall(target_dir, filter="data")
+                else:                                   # pragma: no cover
+                    seguros = [m for m in t.getmembers()
+                               if (m.isfile() or m.isdir())
+                               and (alvo / m.name).resolve().is_relative_to(alvo)]
+                    t.extractall(target_dir, members=seguros)
         else:
             return                      # arquivo solto (.sf2/.mid): fica onde esta
-    except Exception:
-        return
+    except (zipfile.BadZipFile, tarfile.TarError, OSError) as e:
+        raise RuntimeError(
+            f"Nao consegui extrair {archive.name}: {e}\n"
+            "O download pode ter vindo corrompido — apague a pasta "
+            f"{target_dir} e tente de novo.") from e
     archive.unlink(missing_ok=True)
 
 

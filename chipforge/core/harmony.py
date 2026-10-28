@@ -69,6 +69,11 @@ SUSTAINED_CLASH_BEATS = 0.3
 # distancia o choque volta a valer severidade maxima.
 SPREAD_SEMITONES = 10
 
+# Quanto o tritono do V7 (com a fundamental soando) vale na consonancia.
+# Mais que um tritono solto (que e o pior intervalo da tabela), menos que uma
+# terca: e tensao de verdade, so que com funcao.
+DOMINANT_TRITONE = 0.55
+
 SEVERITY_LABEL = {0: "dica", 1: "atencao", 2: "problema"}
 
 
@@ -185,6 +190,7 @@ def _vertical_consonance(slices, issues: list[Issue],
         on_beat = abs(start - round(start)) < 0.03
         if len(pitches) < 2:
             continue
+        pcs_soando = {p % 12 for p in pitches}
         pair_scores = []
         for i in range(len(pitches)):
             for j in range(i + 1, len(pitches)):
@@ -197,6 +203,22 @@ def _vertical_consonance(slices, issues: list[Issue],
                 # ... e doem menos quando estao a mais de duas oitavas
                 if (b - a) >= 24:
                     c = min(1.0, c + 0.25)
+                # Tritono entre a terca e a setima de um acorde dominante (o
+                # La-Re# do B7) nao e choque: e a tensao que FAZ o acorde ser
+                # dominante e pede a resolucao. Reconhece pela fundamental
+                # soando junto (em qualquer track, normalmente no baixo).
+                if ic == 6 and ((a - 4) % 12 in pcs_soando
+                                or (a + 2) % 12 in pcs_soando):
+                    c = DOMINANT_TRITONE
+                    pair_scores.append(c)
+                    if dur >= MIN_REPORT_BEATS and on_beat:
+                        issues.append(Issue(
+                            start, "dominante", 0,
+                            f"{T.midi_to_name(a)}/{T.midi_to_name(b)}: tritono "
+                            "de acorde dominante — tensao funcional, pede "
+                            "resolucao no acorde seguinte",
+                            (a, b), (dono.get(a, ""), dono.get(b, ""))))
+                    continue
                 pair_scores.append(c)
                 if dur < MIN_REPORT_BEATS:
                     continue

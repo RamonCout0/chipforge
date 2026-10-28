@@ -107,6 +107,11 @@ class Project:
     beat_unit: int = 4
     sample_rate: int = 44100
     bit_depth: int = 8            # 8 ou 16 — a "cara" do projeto
+    # console emulado no render. "" = so o bit depth acima; "ps1" = samples
+    # passam pelo SPU do PlayStation (ADPCM, interpolacao gaussiana, 24 vozes
+    # e o reverb de hardware). Ver chipforge.audio.psx
+    console: str = ""
+    psx_taxa: int = 22050         # taxa padrao dos samples na RAM do SPU
     master_gain: float = 0.85
     # sala onde a musica toca — None deixa tudo seco
     master_reverb: dict | None = None
@@ -128,6 +133,8 @@ class Project:
     tracks: list[Track] = field(default_factory=list)
     patterns: dict[str, Pattern] = field(default_factory=dict)
     arrangement: list[ClipRef] = field(default_factory=list)
+    # mensagens para o usuario geradas ao abrir (nao vao para o arquivo)
+    avisos: list = field(default_factory=list, repr=False, compare=False)
 
     # ---- conversoes de tempo -------------------------------------------
     @property
@@ -182,14 +189,25 @@ class Project:
         return end or self.ticks_per_bar * 4
 
     # ---- helpers de edicao ---------------------------------------------
+    @staticmethod
+    def _id_livre(prefixo: str, usados) -> str:
+        """Proximo id que NINGUEM usa. `len()+1` colidia depois de apagar
+        alguma coisa: com p1, p2, p3 e o p2 apagado, o proximo virava 'p3' de
+        novo — e sobrescrevia o pattern p3 que ainda tocava."""
+        usados = set(usados)
+        k = len(usados) + 1
+        while f"{prefixo}{k}" in usados:
+            k += 1
+        return f"{prefixo}{k}"
+
     def new_track(self, name: str, instrument: Instrument) -> Track:
-        tid = f"t{len(self.tracks) + 1}"
+        tid = self._id_livre("t", (t.id for t in self.tracks))
         t = Track(tid, name, instrument)
         self.tracks.append(t)
         return t
 
     def new_pattern(self, name: str | None = None, bars: int = 4) -> Pattern:
-        pid = f"p{len(self.patterns) + 1}"
+        pid = self._id_livre("p", self.patterns)
         pat = Pattern(pid, name or f"Pattern {len(self.patterns) + 1}",
                       self.ticks_per_bar * bars)
         self.patterns[pid] = pat
@@ -252,6 +270,7 @@ class Project:
             "name": self.name, "bpm": self.bpm, "ppq": self.ppq,
             "beats_per_bar": self.beats_per_bar, "beat_unit": self.beat_unit,
             "sample_rate": self.sample_rate, "bit_depth": self.bit_depth,
+            "console": self.console, "psx_taxa": self.psx_taxa,
             "master_gain": self.master_gain,
             "master_reverb": self.master_reverb,
             "master_inserts": self.master_inserts,
@@ -260,7 +279,7 @@ class Project:
             "key_root": self.key_root, "scale": self.scale,
             "scale_lock": self.scale_lock,
             "tempo_map": [[int(t), float(b)] for t, b in self.tempo_map],
-            "tracks": [{**asdict(t), "instrument": t.instrument.to_dict()}
+            "tracks": [{**asdict(t), "instrument": _instrumento_dict(t.instrument)}
                        for t in self.tracks],
             "patterns": {k: asdict(v) for k, v in self.patterns.items()},
             "arrangement": [asdict(c) for c in self.arrangement],
@@ -274,6 +293,8 @@ class Project:
             beat_unit=d.get("beat_unit", 4),
             sample_rate=d.get("sample_rate", 44100),
             bit_depth=d.get("bit_depth", 8),
+            console=d.get("console", "") or "",
+            psx_taxa=d.get("psx_taxa", 22050),
             master_gain=d.get("master_gain", 0.85),
             master_reverb=d.get("master_reverb"),
             master_inserts=d.get("master_inserts", []) or [],
@@ -291,10 +312,18 @@ class Project:
                 try:
                     inst = SamplerInstrument.from_dict(idict)
                 except Exception as e:
-                    # o banco pode nao estar nesta maquina: nao perde o projeto
-                    print(f"[chipforge] banco indisponivel ({e}); "
-                          f"usando instrumento chiptune no lugar")
+                    # O banco pode nao estar nesta maquina. O projeto abre com
+                    # um chiptune no lugar, mas o dict ORIGINAL fica guardado
+                    # no substituto: salvar de novo devolve o sampler intacto,
+                    # e na maquina que tem o banco ele volta a tocar. Antes, o
+                    # substituto era salvo por cima e o instrumento sumia.
                     inst = Instrument(name=idict.get("name", "Sample"))
+                    inst._pendente = dict(idict)
+                    p.avisos.append(
+                        f"Track '{td.get('name', '?')}': banco "
+                        f"{idict.get('sf2', '?')} indisponivel ({e}). "
+                        "Tocando chiptune no lugar; o instrumento original "
+                        "continua salvo no projeto.")
             elif kind == "voz":
                 from ..audio.voz import VozInstrument
                 inst = VozInstrument.from_dict(idict)
@@ -324,5 +353,21 @@ class Project:
 
     @classmethod
     def load(cls, path: str | Path) -> "Project":
-        with zipfile.ZipFile(path) as z:
-            return cls.from_dict(json.loads(z.read("project.json")))
+        try:
+            with zipfile.ZipFile(path) as z:
+                d = json.loads(z.read("project.json"))
+        except (zipfile.BadZipFile, KeyError, json.JSONDecodeError) as e:
+            raise ValueError(f"{Path(path).name} nao e um projeto Chipforge "
+                             f"valido ({e})") from e
+        versao = int(d.get("format_version", 1) or 1)
+        if versao > FORMAT_VERSION:
+            raise ValueError(
+                f"{Path(path).name} foi salvo por uma versao mais nova do "
+                f"Chipforge (formato {versao}; esta le ate {FORMAT_VERSION}).")
+        return cls.from_dict(d)
+
+
+def _instrumento_dict(inst) -> dict:
+    """O substituto de um sampler sem banco salva o sampler original."""
+    pendente = getattr(inst, "_pendente", None)
+    return dict(pendente) if pendente else inst.to_dict()
