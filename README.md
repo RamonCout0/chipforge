@@ -3,8 +3,8 @@
 DAW de chiptune em Python — piano roll, síntese 8/16 bits, e um **medidor de
 harmonia** que diz, em português, se o que você escreveu está soando bem.
 
-![status](https://img.shields.io/badge/fase-2%20(cinematográfico)-brightgreen)
-![tests](https://img.shields.io/badge/testes-177%20passando-brightgreen)
+![status](https://img.shields.io/badge/fase-3%20(PS1%20%2B%20MCP)-brightgreen)
+![tests](https://img.shields.io/badge/testes-275%20passando-brightgreen)
 
 ---
 
@@ -30,6 +30,8 @@ python3 examples/raid_coroa_de_cinzas.py    # 3 minutos, 15 tracks, tema de raid
 python3 examples/vigilia_do_colosso.py      # orquestra + banda de rock, ~2:50
 python3 examples/cantiga_da_torre_afogada.py  # voz + coro + orquestra, ~3:25
 python3 examples/guardia_dos_mares.py          # raid em 3 fases com loop, ~12 min
+python3 examples/fase_de_gelo.py               # modo PS1: fase de gelo, ~50 s
+python3 examples/duelo_de_cristal.py           # modo PS1: tema de chefe, ~54 s
 ```
 
 Os três últimos baixam sozinhos o banco de instrumentos na primeira execução
@@ -58,6 +60,12 @@ naipe de cordas por dobra, guitarras com simulador de amplificador gravadas em
 dobro (uma em cada lado) e sala de concerto por envio de reverb. Ele também
 exporta a curva de intensidade em JSON, para o jogo animar o mesmo personagem
 que o Palco anima aqui dentro.
+
+`fase_de_gelo` é a peça de referência do **modo PS1**: lead de onda quadrada
+sampleada, baixo slap, sinos de vidro e o reverb "Studio Large" do chip de
+som do PlayStation. Ela é escrita inteira pela API do `Estudio` — as mesmas
+chamadas que o servidor MCP expõe —, então serve também de exemplo de como
+compor em texto.
 
 Para rodar os testes:
 
@@ -198,11 +206,85 @@ python3 -m pytest tests -q
 
 ---
 
+## Modo PS1 (32 bits)
+
+No seletor de bits, **32 bits (PS1)** faz o render passar pelo chip de som do
+PlayStation (SPU) — o som de Mega Man 8, Castlevania SotN, FF7:
+
+- **Samples na RAM do SPU**: cada sample do banco é reamostrado para a taxa
+  em que "moraria" no console (22 kHz por padrão, 11 kHz nos baixos) e passa
+  pelo **ADPCM de 4 bits** de verdade (formato VAG, 5 filtros preditores)
+- **Interpolação gaussiana** de 4 pontos na mudança de afinação — o
+  abafamento característico do agudo — e o teto de pitch de ~4x do registrador
+- **24 vozes**: notas além disso roubam a voz mais antiga, como o driver do
+  console fazia, e o render diz quantas foram roubadas
+- **Reverb de hardware** com os presets do SPU (room, studio_small/medium/large,
+  hall, space_echo, half_echo), implementado pela fórmula do psx-spx e
+  validado amostra a amostra nos testes
+
+Projeto PS1: `master_reverb = {"psx": "studio_large", "wet": 0.5}` e o
+`reverb_send` de cada track decide quem vai para a sala.
+
+---
+
+## Compor com o Claude (MCP)
+
+O Chipforge tem um servidor MCP: um assistente compõe, mixa, toca no seu
+alto-falante e mede a música aqui na sua máquina. Ele escreve em **MML**
+(`o5 l8 e g a > c < b4 a |`), gera acompanhamento por **cifra**
+(`Em9 | Cmaj7 | Am7 | B7`) e bateria em **grade** (`k: x...x...`), e usa o
+medidor de harmonia e as medições de master como ouvidos.
+
+```bash
+pip install mcp
+```
+
+Configure o cliente MCP apontando para o lançador (troque o caminho):
+
+```json
+{
+  "mcpServers": {
+    "chipforge": {
+      "command": "python3",
+      "args": ["/home/haji/Documentos/chipforge/mcp_chipforge.py"]
+    }
+  }
+}
+```
+
+No Claude Code: `claude mcp add chipforge -- python3 /caminho/mcp_chipforge.py`
+
+Ferramentas: `novo_projeto`, `criar_track`, `escrever`, `acompanhar`,
+`bateria`, `copiar`, `ver`, `apagar`, `ajustar_track`, `sala`, `master`,
+`analisar`, `renderizar`, `tocar`, `parar`, `comparar_com_referencia`,
+`adotar_referencia`, `salvar_projeto`, `abrir_projeto`, `exportar_midi`,
+`listar_instrumentos`, `ajuda_notacao`. O mesmo vale em Python puro:
+
+```python
+from chipforge.estudio import Estudio
+e = Estudio()
+e.novo("Fase de gelo", bpm=152, tom="E", escala="natural_minor", console="ps1")
+e.criar_track("Lead", "ps1:lead_quadrado", reverb_send=0.3)
+e.escrever("Lead", 1, "o5 l8 e r e f+ g4 b4 | a g f+ g e2 |")
+print(e.renderizar("gelo.wav"))
+```
+
+Na MML, `!c` acentua e `?c` faz nota fantasma; `escrever`, `acompanhar` e
+`bateria` aceitam `humano=8` (ms de espalhamento) e `tendencia_ms` (negativo
+puxa para frente, positivo arrasta) — é o que tira o groove da grade. Guitarra
+e baixo de verdade vêm de `corda:` (modelagem física) com
+`{"tipo": "amp", "preset": "metal"}`, e todo instrumento é calibrado para o
+mesmo nível ao ser criado. `examples/duelo_de_cristal.py` usa tudo isso.
+
+A notação completa está no topo de `chipforge/core/mml.py`.
+
+---
+
 ## Atalhos
 
 | Tecla | Ação |
 |---|---|
-| `Espaço` | Tocar / pausar |
+| `Espaço` | Tocar / pausar / continuar |
 | `Esc` | Parar |
 | Clique esquerdo | Criar nota |
 | Arrastar borda direita | Mudar duração |

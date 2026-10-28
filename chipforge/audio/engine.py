@@ -83,7 +83,8 @@ def _render_track(tr, flat, sr: int, spt: float, total: int,
         getattr(tr.instrument, "osc", "") != "sample"
     if chip_drums:
         return render_drum_notes(flat, sr, spt, volume=tr.volume,
-                                 total_samples=total, mapa=mapa, automacao=auto)
+                                 total_samples=total, mapa=mapa, automacao=auto,
+                                 pan=tr.pan)
 
     sec = getattr(tr, "section", None)
     if not sec or int(sec.get("vozes", 1)) < 2:
@@ -140,21 +141,32 @@ def render_project(project, sr: int | None = None,
     usou_reverb = False
 
     tracks = project.audible_tracks
-    for ti, tr in enumerate(tracks):
-        clips = [c for c in project.arrangement if c.track_id == tr.id]
-        if not clips:
-            continue
+    por_track = []
+    for tr in tracks:
         flat = []
-        for c in clips:
+        for c in project.arrangement:
+            if c.track_id != tr.id:
+                continue
             pat = project.patterns.get(c.pattern_id)
             if not pat:
                 continue
             for n in pat.notes:
                 flat.append(type(n)(n.start + c.start, n.dur, n.pitch, n.velocity))
-        if not flat:
-            continue
+        if flat:
+            por_track.append((tr, flat))
 
-        stereo = _render_track(tr, flat, sr, spt, total, mapa)
+    ps1 = _e_ps1(project)
+    relatorio = {"console": "ps1" if ps1 else (project.console or ""),
+                 "vozes_roubadas": 0, "pico_de_vozes": 0}
+    if ps1:
+        relatorio.update(_limitar_vozes_ps1(project, por_track))
+    from contextlib import nullcontext
+    from . import psx as PSX
+
+    for ti, (tr, flat) in enumerate(por_track):
+        with (PSX.ativo(getattr(project, "psx_taxa", 22050) or 22050)
+              if ps1 else nullcontext()):
+            stereo = _render_track(tr, flat, sr, spt, total, mapa)
         inserts = getattr(tr, "inserts", None)
         if inserts:
             stereo = fx.aplicar(stereo, sr, inserts)[:total]
@@ -167,7 +179,7 @@ def render_project(project, sr: int | None = None,
             barramento += stereo * envio
             usou_reverb = True
         if progress:
-            progress((ti + 1) / len(tracks))
+            progress((ti + 1) / len(por_track))
 
     sala = getattr(project, "master_reverb", None)
     if sala and usou_reverb:
@@ -176,7 +188,12 @@ def render_project(project, sr: int | None = None,
         p["dry"] = 0.0
         # Freeverb tambem tem um parametro chamado "sala", mas la ele e o
         # TAMANHO (0..1); aqui e o NOME da sala. O tipo do valor desempata.
-        if p.pop("conv", None) or isinstance(p.get("sala"), str):
+        if "psx" in p:
+            # o reverb de hardware do PlayStation, preset por nome
+            from . import psx as PSX
+            mix += PSX.reverb(barramento, sr, preset=p["psx"],
+                              wet=float(p.get("wet", 1.0)))[:total]
+        elif p.pop("conv", None) or isinstance(p.get("sala"), str):
             # sala por convolucao: densa desde o primeiro milissegundo, sem as
             # ressonancias de filtro pente que denunciam reverb algoritmico
             from . import espaco
@@ -202,12 +219,62 @@ def render_project(project, sr: int | None = None,
                                  medir_antes=False).audio[:total]
         else:
             mix = fx.limiter(mix, 0.97)
-        if project.bit_depth and project.bit_depth < 24:
-            mix = FX.bitcrush(mix, project.bit_depth)
     peak = float(np.abs(mix).max())
     if peak > 1.0:
         mix /= peak
+    try:
+        project.ultimo_render = relatorio
+    except Exception:                       # pragma: no cover
+        pass
+    # o bitcrush vem DEPOIS da normalizacao: dividir pelo pico tirava o audio
+    # da grade de 8 bits e o "degrau" do NES virava so um chiado leve
+    if apply_master and project.bit_depth and project.bit_depth < 24 \
+            and not _e_ps1(project):
+        mix = FX.bitcrush(mix, project.bit_depth)
     return mix.astype(np.float32)
+
+
+def _limitar_vozes_ps1(project, por_track) -> dict:
+    """Aplica o teto de 24 vozes do SPU antes de renderizar. Notas roubadas
+    sao encurtadas no lugar (sao copias: o projeto nao muda)."""
+    from . import psx as PSX
+    tps = project.bpm / 60.0 * project.ppq            # ticks por segundo
+    eventos = []
+    for tr, flat in por_track:
+        inst = tr.instrument
+        sec = getattr(tr, "section", None) or {}
+        peso = max(1, int(sec.get("vozes", 1)))
+        if getattr(inst, "is_drum", False):
+            rel = 0.12                                 # pele/prato abafa rapido
+        elif getattr(inst, "osc", "") != "sample":
+            rel = getattr(getattr(inst, "env", None), "release", 0.2)
+        else:
+            rel = 0.35                                 # cauda tipica de banco
+        rel_t = int(min(rel, 1.0) * tps)
+        # Driver de som de PS1: a mesma tecla de novo na mesma track reusa a
+        # voz (o chimbal em semicolcheia nao empilha 4 vozes, ele se corta).
+        proximo: dict[int, int] = {}
+        evs_track = []
+        for n in sorted(flat, key=lambda x: x.start, reverse=True):
+            fim = n.start + n.dur + rel_t
+            if n.pitch in proximo:
+                fim = min(fim, proximo[n.pitch])
+            proximo[n.pitch] = n.start
+            evs_track.append([n.start, max(fim, n.start + 1), peso, n])
+        eventos += evs_track
+    # pico de vozes simultaneas ANTES do corte — diz quanto o arranjo pediu
+    marcas = sorted([(e[0], e[2]) for e in eventos] +
+                    [(e[1], -e[2]) for e in eventos], key=lambda m: (m[0], m[1]))
+    atual = pico = 0
+    for _, d in marcas:
+        atual += d
+        pico = max(pico, atual)
+    roubadas = PSX.limitar_vozes(eventos)
+    return {"vozes_roubadas": roubadas, "pico_de_vozes": pico}
+
+
+def _e_ps1(project) -> bool:
+    return (getattr(project, "console", "") or "").lower() == "ps1"
 
 
 def render_pattern(project, pattern, track=None, sr: int | None = None) -> np.ndarray:
@@ -223,7 +290,7 @@ def render_pattern(project, pattern, track=None, sr: int | None = None) -> np.nd
 
 def render_drum_notes(notes, sr: int, sec_per_tick: float,
                       volume: float = 1.0, total_samples: int | None = None,
-                      mapa=None, automacao=None):
+                      mapa=None, automacao=None, pan: float = 0.0):
     """Bateria: cada pitch MIDI vira um preset diferente (mapa GM)."""
     from ..audio.instrument import factory_by_name
 
@@ -250,7 +317,7 @@ def render_drum_notes(notes, sr: int, sec_per_tick: float,
     buf *= volume
     if automacao is not None:
         buf *= automacao.curva(len(buf), mapa, sr, sec_per_tick)
-    st = FX.stereo_pan(buf, 0.0)
+    st = FX.stereo_pan(buf, pan)
     return st[:n_total] if total_samples else st
 
 

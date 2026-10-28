@@ -8,5 +8,8 @@ PyQt6>=6.5
 # scipy o render de três minutos passa de segundos para horas.
 scipy>=1.10
 
+# opcional: servidor MCP (compor com o Claude). Ver README.
+mcp>=1.2
+
 # opcional, só para os testes
 pytest>=7.0

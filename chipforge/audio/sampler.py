@@ -352,6 +352,9 @@ class SamplerInstrument:
     # A interface poe False quando voce mexe nos sliders de ADSR na mao.
     env_do_banco: bool = True
     cauda_max_s: float = 4.0
+    # modo PS1: taxa em que este sample "mora" na RAM do SPU. 0 = a do projeto
+    # (22050). Baixo em 11025 e o truque classico para caber mais coisa.
+    psx_taxa: int = 0
 
     def __post_init__(self):
         if not self.name:
@@ -410,14 +413,31 @@ class SamplerInstrument:
         if len(data) < 4:
             return np.zeros(total, dtype=np.float32)
 
+        from . import psx as PSX
+        modo_psx = PSX.ESTADO["ligado"]
+        taxa_dados = hdr.sample_rate
+        ls = hdr.loop_start - hdr.start
+        le = hdr.loop_end - hdr.start
+        if modo_psx:
+            # o sample como estaria na RAM do PlayStation: taxa baixa + ADPCM
+            alvo = self.psx_taxa or PSX.ESTADO["taxa"]
+            data, taxa_dados = PSX.amostra_na_ram(
+                (str(self.soundfont.path), z.sample_index), data,
+                hdr.sample_rate, alvo)
+            esc = taxa_dados / hdr.sample_rate
+            ls, le = ls * esc, le * esc
+
         root = self._effective_root(z)
         cents = ((pitch - root) * 100 + z.coarse * 100 + z.fine
                  + hdr.pitch_correction + self.detune_cents)
-        ratio = (2.0 ** (cents / 1200.0)) * (hdr.sample_rate / sr)
+        ratio = (2.0 ** (cents / 1200.0)) * (taxa_dados / sr)
+        if modo_psx:
+            # o registrador de pitch do SPU para em ~4x: nota aguda demais
+            # simplesmente nao sobe mais — limitacao que os compositores
+            # contornavam gravando o sample uma oitava acima
+            ratio = min(ratio, PSX.PASSO_MAXIMO * 44100.0 / sr)
 
-        loop = z.loop_mode in (1, 3) and hdr.loop_end > hdr.loop_start + 8
-        ls = hdr.loop_start - hdr.start
-        le = hdr.loop_end - hdr.start
+        loop = z.loop_mode in (1, 3) and le > ls + 8
 
         if self.vibrato_depth_cents > 0:
             # Vibrato de verdade: a razao de leitura varia AO LONGO da nota, e
@@ -441,10 +461,13 @@ class SamplerInstrument:
         else:
             idx = np.clip(idx, 0, len(data) - 1.001)
 
-        i0 = idx.astype(np.int64)
-        frac = (idx - i0).astype(np.float32)
-        i1 = np.minimum(i0 + 1, len(data) - 1)
-        sig = data[i0] * (1 - frac) + data[i1] * frac
+        if modo_psx:
+            sig = PSX.ler_gaussiano(data, idx).astype(np.float32)
+        else:
+            i0 = idx.astype(np.int64)
+            frac = (idx - i0).astype(np.float32)
+            i1 = np.minimum(i0 + 1, len(data) - 1)
+            sig = data[i0] * (1 - frac) + data[i1] * frac
         if not loop:
             sig[idx >= len(data) - 1.01] = 0.0
 
@@ -481,7 +504,11 @@ class SamplerInstrument:
                 "env": asdict(self.env), "bits": self.bits,
                 "sample_rate_crush": self.sample_rate_crush,
                 "lowpass_hz": self.lowpass_hz, "drive": self.drive,
-                "detune_cents": self.detune_cents, "is_drum": self.is_drum}
+                "detune_cents": self.detune_cents, "is_drum": self.is_drum,
+                "vibrato_depth_cents": self.vibrato_depth_cents,
+                "vibrato_hz": self.vibrato_hz,
+                "env_do_banco": self.env_do_banco,
+                "psx_taxa": self.psx_taxa}
 
     @classmethod
     def from_dict(cls, d: dict) -> "SamplerInstrument":
@@ -498,7 +525,11 @@ class SamplerInstrument:
                    lowpass_hz=d.get("lowpass_hz", 0.0),
                    drive=d.get("drive", 1.0),
                    detune_cents=d.get("detune_cents", 0.0),
-                   is_drum=d.get("is_drum", False))
+                   is_drum=d.get("is_drum", False),
+                   vibrato_depth_cents=d.get("vibrato_depth_cents", 0.0),
+                   vibrato_hz=d.get("vibrato_hz", 5.2),
+                   env_do_banco=d.get("env_do_banco", True),
+                   psx_taxa=d.get("psx_taxa", 0))
 
 
 # --------------------------------------------------------------------------
